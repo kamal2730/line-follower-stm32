@@ -1,56 +1,19 @@
-# STM32CubeIDE specific files
-/.settings/
-/Debug/
-/Release/
-/*.launch
-*.log
-*.bak
-*.swp
-*.tmp
-*.user
-
-# IDE specific files
-/.project
-/.cproject
-/.mxproject
-
-# Build files
-/build/
-/out/
-
-# Object files and binaries
-*.o
-*.d
-*.elf
-*.bin
-*.hex
-*.map
-*.list
-*.srec
-
-# Backup and temporary files
-*~
-*.tmp
-*.bak
-*.swp
-
-# Ignore generated files
-/Drivers/
-/Middlewares/
-/Core/Inc/
-/Core/Src/
 # macOS specific files
 .DS_Store
 .AppleDouble
 .LSOverride
 
-# Icon files
-Icon?
-._*
+# Icon must end with two \r
+Icon
 
 # Thumbnails
-._.DS_Store
+._*
 
 # Files that might appear on external disk
 .Spotlight-V100
 .Trashes
+
+# macOS specific metadata files
+*.swp
+*.lock
+*.swo
