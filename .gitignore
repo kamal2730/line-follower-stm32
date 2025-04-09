@@ -1,0 +1,41 @@
+# STM32CubeIDE specific files
+/.settings/
+/Debug/
+/Release/
+/*.launch
+*.log
+*.bak
+*.swp
+*.tmp
+*.user
+
+# IDE specific files
+/.project
+/.cproject
+/.mxproject
+
+# Build files
+/build/
+/out/
+
+# Object files and binaries
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.srec
+
+# Backup and temporary files
+*~
+*.tmp
+*.bak
+*.swp
+
+# Ignore generated files
+/Drivers/
+/Middlewares/
+/Core/Inc/
+/Core/Src/
