@@ -517,21 +517,33 @@ int main(void)
       // Get line position
       int position = line_data();
 
-      checkAndHandleTurn();
+      turn = (position > 50 && position <= 70) ? -1 : (position < 20) ? 1 : turn;
+
+      // If line is lost and a turn is needed
+      if (turn) {
+          while (position == 255) {
+              if (turn == 1) { // Turn right
+                  setMotorSpeed(0, 150);
+                  setMotorSpeed(1, -150);
+              } else if (turn == -1) { // Turn left
+                  setMotorSpeed(0, -150);
+                  setMotorSpeed(1, 150);
+              }
+
+              HAL_ADC_Start_DMA(&hadc1, (uint32_t*) adc_buffer, 8);
+              position = line_data(); // Re-check for line
+          }
+
+          HAL_ADC_Start_DMA(&hadc1, (uint32_t*) adc_buffer, 8);
+          position = line_data(); // Final update after recovery
+      }
+
+      error=setpoint-position;
+
+      computePID(error, position);
 
       // Handle line following
-      while(position != 255) {  // If line is detected
-          // Calculate error
-    	  position=line_data();
-          error = position - setpoint;
 
-          // Compute PID and apply to motors
-          computePID(error, position);
-      }
-//      else {  // Line lost - implement recovery behavior
-//          setMotorSpeed(0, -100);  // Turn in place
-//          setMotorSpeed(1, 100);
-//      }
 //      printSensorState();
 
 //      checkAndHandleTurn();
