@@ -70,9 +70,9 @@ int thresh[8] = {900,900,900,900,900,900,900,900};  // Threshold for black line 
 int position;
 
 // PID variables
-float Kp = 13.5;
-float Ki = 0.01;
-float Kd = 4;
+double Kp = 13.5;
+double Ki = 0.01;
+double Kd = 4;
 double error = 0;
 double P = 0, I = 0, D = 0;
 double lastInput = 0;
@@ -187,6 +187,8 @@ void computePID(double error, int32_t input) {
     // Update variables for next iteration
     lastInput = input;
     lastTime = HAL_GetTick();
+    setMotorSpeed(0, base_speed - correction);
+    setMotorSpeed(1, base_speed + correction);
 }
 
 void checkAndHandleTurn() {
@@ -223,30 +225,58 @@ void checkAndHandleTurn() {
     }
 }
 
-void callibrate(){
-	//20 sec callibration
-	for (int i=0;i<8;i++){
-		minValues[i]=adc_buffer[i];
-		maxValues[i]=adc_buffer[i];
-	}
-	for (int j = 0; j < 20000; j++) {
-		 HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8);
-		 HAL_Delay(1);
-	    for (int i = 0; i < 8; i++) {
-	      if (adc_buffer[i] < minValues[i]) {
-	        minValues[i] = adc_buffer[i];
-	      }
-	      if (adc_buffer[i] > maxValues[i]) {
-	        maxValues[i] = adc_buffer[i];
-	      }
-	    }
-	  }
-	for (int i = 0; i < 8; i++) {
-	        thresh[i] = (minValues[i] + maxValues[i]) / 2;
-	}
-	//add led functions
-	saveToFlash();
+volatile uint8_t adc_ready = 0;
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
+    if (hadc->Instance == ADC1) {
+        adc_ready = 1;
+    }
 }
+
+// Non-blocking callibrate()
+void callibrate() {
+    static int j = 0;
+    static uint8_t init_done = 0;
+
+    if (!init_done) {
+        for (int i = 0; i < 8; i++) {
+            minValues[i] = adc_buffer[i];
+            maxValues[i] = adc_buffer[i];
+        }
+        init_done = 1;
+        j = 0;
+        adc_ready = 0;
+        HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8); // Start once
+    }
+
+    if (adc_ready && j < 10000) {
+        adc_ready = 0; // Reset flag
+        for (int i = 0; i < 8; i++) {
+            if (adc_buffer[i] < minValues[i]) minValues[i] = adc_buffer[i];
+            if (adc_buffer[i] > maxValues[i]) maxValues[i] = adc_buffer[i];
+        }
+
+        j++;
+
+        // Start next conversion
+        HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8);
+
+        if (j >= 10000) {
+            for (int i = 0; i < 8; i++) {
+                thresh[i] = (minValues[i] + maxValues[i]) / 2;
+            }
+
+            char done[] = "Calibration done\n";
+            HAL_UART_Transmit(&huart6, (uint8_t*)done, strlen(done), HAL_MAX_DELAY);
+
+            // Reset state
+            init_done = 0;
+            j = 0;
+        }
+    }
+}
+
+
 
 void setPIDParameter(char *input) {
     char *ptr = input;
@@ -255,7 +285,7 @@ void setPIDParameter(char *input) {
         char type = *ptr;
         ptr++;
 
-        char valueStr[10] = {0};
+        char valueStr[12] = {0};
         int i = 0;
 
         while (*ptr != 'P' && *ptr != 'p' &&
@@ -265,7 +295,7 @@ void setPIDParameter(char *input) {
             valueStr[i++] = *ptr++;
         }
 
-        float value = atof(valueStr);
+        double value = atof(valueStr);
 
         switch (type) {
             case 'P': case 'p':
@@ -282,7 +312,7 @@ void setPIDParameter(char *input) {
 
     char confirm[] = "PID updated\n";
     HAL_UART_Transmit(&huart6, (uint8_t*)confirm, strlen(confirm), HAL_MAX_DELAY);
-    saveToFlash();
+//    saveToFlash();
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
@@ -290,13 +320,23 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
         memset(main_buffer, '\0', 16);
         memcpy(main_buffer, rx_buffer, Size);
         memset(rx_buffer, '\0', 16);
+        main_buffer[Size] = '\0';
+
+        int len = strlen((char*)main_buffer);
+        while (len > 0 && (main_buffer[len-1] == '\r' || main_buffer[len-1] == '\n')) {
+            main_buffer[--len] = '\0';
+        }
 
         // Handle 'Q' query
         if (strcmp((char*)main_buffer, "Q") == 0) {
             char status[128];
 
             // Send PID values
-            sprintf(status, "Kp=%.2f Ki=%.3f Kd=%.2f\nThresh: ", (double)Kp, (double)Ki, (double)Kd); // @suppress("Float formatting support")
+            snprintf(status, sizeof(status),
+                "Kp=%d.%02d Ki=%d.%03d Kd=%d.%02d\nThresh: ",
+                (int)Kp, (int)(Kp * 100) % 100,
+                (int)Ki, (int)(Ki * 1000) % 1000,
+                (int)Kd, (int)(Kd * 100) % 100);
             HAL_UART_Transmit(&huart6, (uint8_t*)status, strlen(status), HAL_MAX_DELAY);
 
             // Send all 8 threshold values in one line
@@ -310,7 +350,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
         }
 
         // Handle 'C' or 'c' for calibration
-        else if ((main_buffer[0] == 'C' || main_buffer[0] == 'c') && main_buffer[1] == '\0') {
+        else if ((main_buffer[0] == 'C' || main_buffer[0] == 'c') && len ==1) {
             callibrate();
             char msg[] = "Calibration done\n";
             HAL_UART_Transmit(&huart6, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
@@ -326,7 +366,6 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
         __HAL_DMA_DISABLE_IT(&hdma_usart6_rx, DMA_IT_HT);
     }
 }
-
 
 void printSensorState(void) {
     // Print sensor readings visually
@@ -464,7 +503,7 @@ int main(void)
   __HAL_DMA_DISABLE_IT(&hdma_usart6_rx, DMA_IT_HT);
 
   //EEPROM
-  loadFromFlash();
+//  loadFromFlash();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -481,20 +520,21 @@ int main(void)
       checkAndHandleTurn();
 
       // Handle line following
-      if (position != 255) {  // If line is detected
+      while(position != 255) {  // If line is detected
           // Calculate error
+    	  position=line_data();
           error = position - setpoint;
 
           // Compute PID and apply to motors
           computePID(error, position);
-          setMotorSpeed(0, base_speed - correction);
-          setMotorSpeed(1, base_speed + correction);
       }
-      else {  // Line lost - implement recovery behavior
-          setMotorSpeed(0, -100);  // Turn in place
-          setMotorSpeed(1, 100);
-      }
-      printSensorState();
+//      else {  // Line lost - implement recovery behavior
+//          setMotorSpeed(0, -100);  // Turn in place
+//          setMotorSpeed(1, 100);
+//      }
+//      printSensorState();
+
+//      checkAndHandleTurn();
 
       /* USER CODE END WHILE */
 
@@ -970,3 +1010,4 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
