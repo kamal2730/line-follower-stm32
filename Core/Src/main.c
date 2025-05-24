@@ -38,6 +38,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MAX_INTEGRAL 25.0
+#define DEADBAND 2.0
+#define LINE_LOST_TIMEOUT 1000  // milliseconds
+#define EMERGENCY_STOP_THRESHOLD 2000  // ADC value for emergency stop
 
 /* USER CODE END PD */
 
@@ -65,9 +69,14 @@ uint32_t minValues[8];
 uint32_t maxValues[8];
 
 // Line following parameters
-int sensorWeight[8] = {70, 60, 50, 40, 30, 20, 10, 0};
+int sensorWeight[8] = {0,20 ,40,60,80,100,120,140};
 int thresh[8] = {900,900,900,900,900,900,900,900};  // Threshold for black line detection
 int position;
+int callibrate_flag=0;
+uint32_t line_lost_time = 0;
+int emergency_stop = 0;
+uint8_t printsensor_flag=0;
+uint8_t printsensorraw_flag=0;
 
 // PID variables
 double Kp = 13.5;
@@ -75,9 +84,10 @@ double Ki = 0.01;
 double Kd = 4;
 double error = 0;
 double P = 0, I = 0, D = 0;
+double lastError = 0;
 double lastInput = 0;
 uint32_t lastTime = 0;
-int setpoint = 35;
+int setpoint = 70;
 
 // Motor control
 double base_speed = 200;
@@ -116,7 +126,7 @@ void setPIDParameter(char *input);
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size);
 void printSensorState();
 void saveToFlash();
-
+void printSensorValues();
 
 /* USER CODE END PFP */
 /* Private user code ---------------------------------------------------------*/
@@ -146,7 +156,7 @@ void setMotorSpeed(uint8_t motor, int32_t speed) {
     }
 }
 
-// Line position calculation
+// Line position calculation with timeout
 int line_data(void) {
     int sum = 0;
     int weighted_sum = 0;
@@ -164,78 +174,52 @@ int line_data(void) {
         return 255;  // Line lost condition
     }
 
+    line_lost_time = 0;  // Reset timeout if line is found
     return weighted_sum / sum;
 }
 
 // PID computation
 void computePID(double error, int32_t input) {
+
     double timeChange = (double)(HAL_GetTick() - lastTime);
+    if (timeChange <= 0) timeChange = 1;
 
     // Calculate PID terms
     P = Kp * error;
-    I += Ki * error * timeChange;
 
-    // Limit integral term
-    if (I > 25) I = 25;
-    if (I < -25) I = -25;
+    // Anti-windup: only integrate if output isn't saturated
+    if(fabs(correction) < base_speed) {
+        I += Ki * error * timeChange;
+        // Limit integral term
+        if(I > MAX_INTEGRAL) I = MAX_INTEGRAL;
+        if(I < -MAX_INTEGRAL) I = -MAX_INTEGRAL;
+    }
 
+    // Filtered derivative term
     D = Kd * (input - lastInput) / timeChange;
 
     // Calculate correction
     correction = P + I + D;
 
+    // Limit correction to base speed
+    if(correction > base_speed) correction = base_speed;
+    if(correction < -base_speed) correction = -base_speed;
+
     // Update variables for next iteration
+    lastError = error;
     lastInput = input;
     lastTime = HAL_GetTick();
+
+    // Apply motor speeds
     setMotorSpeed(0, base_speed - correction);
     setMotorSpeed(1, base_speed + correction);
 }
 
-void checkAndHandleTurn() {
-    position = line_data();
 
-    // Detect junction or sharp turn
-    turn = (position > 50 && position <= 70) ? -1 : (position < 20) ? 1 : turn;
-
-    // If line is lost and a turn is needed
-    if (turn) {
-        while (position == 255) {
-            if (turn == 1) { // Turn right
-                setMotorSpeed(0, 150);
-                setMotorSpeed(1, -150);
-            } else if (turn == -1) { // Turn left
-                setMotorSpeed(0, -150);
-                setMotorSpeed(1, 150);
-            }
-
-            HAL_ADC_Start_DMA(&hadc1, (uint32_t*) adc_buffer, 8);
-            position = line_data(); // Re-check for line
-        }
-
-        HAL_ADC_Start_DMA(&hadc1, (uint32_t*) adc_buffer, 8);
-        position = line_data(); // Final update after recovery
-    }
-
-    // Update turn direction for next time
-    turn = (position > 52 && position <= 70) ? -1 : (position < 20) ? 1 : turn;
-
-    // Skip rest of loop if line is still lost
-    if (position == 255) {
-        return;
-    }
-}
-
-volatile uint8_t adc_ready = 0;
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
-    if (hadc->Instance == ADC1) {
-        adc_ready = 1;
-    }
-}
 
 // Non-blocking callibrate()
 void callibrate() {
-    static int j = 0;
+    static uint32_t start_time = 0;
     static uint8_t init_done = 0;
 
     if (!init_done) {
@@ -243,39 +227,30 @@ void callibrate() {
             minValues[i] = adc_buffer[i];
             maxValues[i] = adc_buffer[i];
         }
+        start_time = HAL_GetTick();
         init_done = 1;
-        j = 0;
-        adc_ready = 0;
-        HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8); // Start once
     }
 
-    if (adc_ready && j < 10000) {
-        adc_ready = 0; // Reset flag
+    if (HAL_GetTick() - start_time < 10000) {  // Run for 10 seconds
+        HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8);
+
         for (int i = 0; i < 8; i++) {
             if (adc_buffer[i] < minValues[i]) minValues[i] = adc_buffer[i];
             if (adc_buffer[i] > maxValues[i]) maxValues[i] = adc_buffer[i];
         }
-
-        j++;
-
-        // Start next conversion
-        HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8);
-
-        if (j >= 10000) {
-            for (int i = 0; i < 8; i++) {
-                thresh[i] = (minValues[i] + maxValues[i]) / 2;
-            }
-
-            char done[] = "Calibration done\n";
-            HAL_UART_Transmit(&huart6, (uint8_t*)done, strlen(done), HAL_MAX_DELAY);
-
-            // Reset state
-            init_done = 0;
-            j = 0;
+    } else {
+        for (int i = 0; i < 8; i++) {
+            thresh[i] = (minValues[i] + maxValues[i]) / 2;
         }
+
+        char done[] = "Calibration done\n";
+        HAL_UART_Transmit(&huart6, (uint8_t*)done, strlen(done), HAL_MAX_DELAY);
+
+        // Reset state
+        init_done = 0;
+        callibrate_flag = 0;
     }
 }
-
 
 
 void setPIDParameter(char *input) {
@@ -351,12 +326,15 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
 
         // Handle 'C' or 'c' for calibration
         else if ((main_buffer[0] == 'C' || main_buffer[0] == 'c') && len ==1) {
-            callibrate();
-            char msg[] = "Calibration done\n";
-            HAL_UART_Transmit(&huart6, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+        	callibrate_flag=1;
         }
-
+        else if ((main_buffer[0] == 'M' || main_buffer[0] == 'm') && len ==1){
+        	printsensor_flag=(printsensor_flag==1)?0:1;
+        }
         // Fallback: PID parameter input
+        else if ((main_buffer[0] == 'R' || main_buffer[0] == 'r') && len ==1){
+                	printsensorraw_flag=(printsensorraw_flag==1)?0:1;
+                }
         else {
             setPIDParameter((char*) main_buffer);
         }
@@ -382,6 +360,19 @@ void printSensorState(void) {
     HAL_UART_Transmit(&huart6, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 }
 
+void printSensorValues(void) {
+    char msg[64];
+
+    HAL_UART_Transmit(&huart6, (uint8_t*)"Sensor Values: ", 15, HAL_MAX_DELAY);
+
+    for (int i = 0; i < 8; i++) {
+        sprintf(msg, "%4lu ", adc_buffer[i]);
+        HAL_UART_Transmit(&huart6, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+    }
+
+    HAL_UART_Transmit(&huart6, (uint8_t*)"\r\n", 2, HAL_MAX_DELAY);
+}
+
 void saveToFlash() {
 
     HAL_FLASH_Unlock();
@@ -402,7 +393,7 @@ void saveToFlash() {
 
     // Write magic number
     HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, address, EEPROM_MAGIC);
-    address += 4;
+    address += 8;
 
     // Write PID
     HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, address, *(double*)&Kp); address += 8;
@@ -411,7 +402,7 @@ void saveToFlash() {
 
     // Write threshold array
     for (int i = 0; i < 8; i++) {
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, address, (uint32_t)thresh[i]);
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, address, (uint64_t)thresh[i]);
         address += 4;
     }
 
@@ -421,8 +412,8 @@ void saveToFlash() {
 void loadFromFlash() {
     uint32_t address = FLASH_USER_START_ADDR;
 
-    uint32_t magic = *(uint32_t*)address;
-    address += 4;
+    uint32_t magic = *(uint64_t*)address;
+    address += 8;
 
     if (magic != EEPROM_MAGIC) {
         // Flash is empty or invalid — don't load
@@ -512,12 +503,13 @@ int main(void)
   while (1) {
       // Start new ADC conversion
       HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 8);
+      position=line_data();
 
+      while (callibrate_flag==1){
+    	callibrate();
+      }
 
-      // Get line position
-      int position = line_data();
-
-      turn = (position > 50 && position <= 70) ? -1 : (position < 20) ? 1 : turn;
+      turn = (position >100 && position <= 140) ? 1 : (position < 40) ? -1 : turn;
 
       // If line is lost and a turn is needed
       if (turn) {
@@ -536,6 +528,7 @@ int main(void)
 
           HAL_ADC_Start_DMA(&hadc1, (uint32_t*) adc_buffer, 8);
           position = line_data(); // Final update after recovery
+//          turn = (position > 50 && position <= 70) ? 1 : (position < 20) ? -1 : turn;
       }
 
       error=setpoint-position;
@@ -543,8 +536,13 @@ int main(void)
       computePID(error, position);
 
       // Handle line following
-
-//      printSensorState();
+//
+      if(printsensor_flag==1){
+    	  printSensorState();
+      }
+      if(printsensorraw_flag==1){
+    	  printSensorValues();
+            }
 
 //      checkAndHandleTurn();
 
@@ -1022,4 +1020,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-
